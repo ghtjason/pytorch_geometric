@@ -207,3 +207,24 @@ def test_relgt_tokenizer_invalid_inputs():
 
     with pytest.raises(ValueError, match="at least one entry"):
         RelGTTokenizer(16, [], DictEncoder(4, 16))
+
+
+def test_relgt_tokenizer_odd_channels():
+    feat_dict, node_idx, node_type, hop, rel_time, edge_index = get_inputs()
+
+    model = RelGTTokenizer(5, NODE_TYPES, DictEncoder(4, 5))
+    assert model.time_enc.out_channels == 6
+    out = model(feat_dict, node_idx, node_type, hop, rel_time, edge_index)
+    assert out.size() == (2, 4, 5)
+
+
+def test_relgt_tokenizer_small_channels():
+    with pytest.raises(ValueError, match="'channels' must be at least 4"):
+        RelGTTokenizer(3, NODE_TYPES, DictEncoder(4, 3))
+
+    # Smaller sizes work with a custom positional encoder:
+    feat_dict, node_idx, node_type, hop, rel_time, edge_index = get_inputs()
+    model = RelGTTokenizer(3, NODE_TYPES, DictEncoder(4, 3),
+                           pe_encoder=ZeroPE(3))
+    out = model(feat_dict, node_idx, node_type, hop, rel_time, edge_index)
+    assert out.size() == (2, 4, 3)

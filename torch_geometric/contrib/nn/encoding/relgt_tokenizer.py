@@ -2,70 +2,95 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch import Tensor
-from torch.nn import Embedding
+from torch.nn import Embedding, LayerNorm, ModuleList, Parameter
 
 from torch_geometric.contrib.nn.encoding.subgraph_gnn_pe import SubgraphGNNPE
 from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.encoding import PositionalEncoding
+from torch_geometric.nn.models import MLP
 
 SECONDS_PER_DAY = 60 * 60 * 24
 
+
 class RelGTTokenizer(torch.nn.Module):
-    """The multi-element tokenizer from the "Relational Graph Transformer"
-    paper (https://arxiv.org/abs/2505.10960).
+    r"""The multi-element tokenizer from the `"Relational Graph Transformer"
+    <https://arxiv.org/abs/2505.10960>`_ paper.
 
-    For each of the B seed nodes v_i in a batch, the sampler provides K 
-    sampled nodes v_j. Each v_j is turned into a token by embedding 
-    five elements and combining their concatenation via learned matrix O:
+    Given :math:`K` sampled nodes :math:`v_j` for each of :math:`B` seed nodes
+    :math:`v_i`, every sampled node is turned into a token by embedding five
+    elements, normalizing each of them, and mixing their concatenation:
 
-        h_token(v_j) = O [h_feat(v_j) || h_type(v_j) || h_hop(v_i, v_j)
-            || h_time(v_i, v_j) || h_PE(v_j)]
+    .. math::
+        \mathbf{h}_{\textrm{token}}(v_j) = \textrm{MLP} \left(
+        \mathbf{h}_{\textrm{feat}}(v_j) \, \Vert \,
+        \mathbf{h}_{\textrm{type}}(v_j) \, \Vert \,
+        \mathbf{h}_{\textrm{hop}}(v_i, v_j) \, \Vert \,
+        \mathbf{h}_{\textrm{time}}(v_i, v_j) \, \Vert \,
+        \mathbf{h}_{\textrm{PE}}(v_j) \right)
 
-    where O is a learned (d x 5d) matrix, || denotes concatenation, and we 
-    have the following elements:
+    where each element is followed by a
+    :class:`~torch.nn.LayerNorm`, and
 
-    - h_feat encodes the row features of v_j via the given feature_encoder,
-    - h_type embeds the node type (i.e., the table) of v_j,
-    - h_hop embeds the hop distance between v_i and v_j,
-    - h_time encodes the relative time tau(v_i) - tau(v_j) (converted from
-      seconds to days) via PositionalEncoding followed by a linear
-      projection, and
-    - h_PE is a positional encoding computed on the sampled subgraphs (by
-      default, SubgraphGNNPE).
+    * :math:`\mathbf{h}_{\textrm{feat}}` encodes the row features of
+      :math:`v_j` via the given :obj:`feature_encoder`,
+    * :math:`\mathbf{h}_{\textrm{type}}` embeds the node type (*i.e.*, table)
+      of :math:`v_j`,
+    * :math:`\mathbf{h}_{\textrm{hop}}` embeds the hop distance between
+      :math:`v_i` and :math:`v_j`,
+    * :math:`\mathbf{h}_{\textrm{time}}` encodes the relative time
+      :math:`\tau(v_i) - \tau(v_j)` (converted from seconds to days) via
+      :class:`~torch_geometric.nn.encoding.PositionalEncoding` followed by a
+      linear projection, and
+    * :math:`\mathbf{h}_{\textrm{PE}}` is a positional encoding computed on
+      the sampled subgraphs (by default,
+      :class:`~torch_geometric.contrib.nn.encoding.SubgraphGNNPE`).
 
-    Hop distances 0, ..., max_hops denote sampled neighbors, while the extra
-    hop value max_hops + 1 denotes randomly sampled filler nodes used when
-    fewer than K neighbors exist.
+    Hop distances :math:`0, \ldots, \textrm{max\_hops}` denote sampled
+    neighbors, while the extra hop value :obj:`max_hops + 1` denotes randomly
+    sampled filler nodes used when fewer than :math:`K` neighbors exist.
+    Tokens with negative relative time (*i.e.*, from the future of the seed
+    node, which can only occur for filler nodes) are assigned a learnable
+    time embedding instead.
+
+    .. note::
+
+        This follows the `reference implementation
+        <https://github.com/snap-stanford/relgt>`_, which differs from
+        Eq. (4) and (6) of the paper:
+        The paper mixes the elements with a single linear map and encodes
+        relative time linearly, while the reference implementation uses
+        layer normalization, a two-layer MLP, and a sinusoidal time encoding.
 
     Args:
-        channels (int): Size d of each token. Needs to be at least 4 if
-            pe_encoder is None, since SubgraphGNNPE uses channels // 4
-            hidden channels.
-        node_types (List[str]): The node types (i.e., table names). The i-th
-            entry is the node type with ID i in the node_type input of
-            forward().
+        channels (int): Size :math:`d` of each token. Needs to be at least
+            :obj:`4` if :obj:`pe_encoder` is :obj:`None`.
+        node_types (List[str]): The node types (*i.e.*, table names). The
+            :obj:`i`-th entry is the node type with ID :obj:`i` in the
+            :obj:`node_type` input of :meth:`forward`.
         feature_encoder (torch.nn.Module): A module mapping a dictionary of
-            per-node-type inputs (e.g., torch_frame.TensorFrame objects) to a
-            dictionary of node features of shape
-            [num_nodes_of_type, channels], such as the HeteroEncoder of the
-            RelBench pipeline.
+            per-node-type inputs (*e.g.*, :class:`torch_frame.TensorFrame`
+            objects) to a dictionary of node features of shape
+            :obj:`[num_nodes_of_type, channels]`, such as the
+            :obj:`HeteroEncoder` of the RelBench pipeline.
         max_hops (int, optional): The maximum hop distance of sampled
-            neighbors. 
+            neighbors. (default: :obj:`2`)
         pe_encoder (torch.nn.Module, optional): The positional encoder,
-            called as pe_encoder(edge_index, num_nodes, batch=batch,
-            batch_size=batch_size) and returning a tensor of shape
-            [num_nodes, channels]. If set to None, will use SubgraphGNNPE 
-            with channels output channels.
+            called as :obj:`pe_encoder(edge_index, num_nodes, batch=batch,
+            batch_size=batch_size)` and returning a tensor of shape
+            :obj:`[num_nodes, channels]`.
+            If set to :obj:`None`, will use
+            :class:`~torch_geometric.contrib.nn.encoding.SubgraphGNNPE`
+            with :obj:`channels` output channels. (default: :obj:`None`)
 
     Shapes:
-        - input:
-          per-node-type inputs to feature_encoder,
-          node indices (B, K),
-          node type IDs (B, K),
-          hop distances (B, K),
-          relative times in seconds (B, K),
-          subgraph edge indices (2, num_edges)
-        - output: tokens (B, K, d)
+        - **input:**
+          per-node-type inputs to :obj:`feature_encoder`,
+          node indices :math:`(B, K)`,
+          node type IDs :math:`(B, K)`,
+          hop distances :math:`(B, K)`,
+          relative times in seconds :math:`(B, K)`,
+          subgraph edge indices :math:`(2, |\mathcal{E}|)`
+        - **output:** tokens :math:`(B, K, d)`
     """
     def __init__(
         self,
@@ -103,24 +128,31 @@ class RelGTTokenizer(torch.nn.Module):
         time_channels = channels + channels % 2
         self.time_enc = PositionalEncoding(time_channels)
         self.time_lin = Linear(time_channels, channels)
+        self.time_mask = Parameter(torch.empty(channels))
         if pe_encoder is None:
             pe_encoder = SubgraphGNNPE(channels)
         self.pe_encoder = pe_encoder
-        self.lin = Linear(5 * channels, channels)
+
+        self.norms = ModuleList([LayerNorm(channels) for _ in range(5)])
+        self.mlp = MLP([5 * channels, 2 * channels, channels], act='relu',
+                       norm=None)
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        """Resets all learnable parameters of the module."""
+        r"""Resets all learnable parameters of the module."""
         if hasattr(self.feature_encoder, 'reset_parameters'):
             self.feature_encoder.reset_parameters()
         self.type_emb.reset_parameters()
         self.hop_emb.reset_parameters()
         self.time_enc.reset_parameters()
         self.time_lin.reset_parameters()
+        torch.nn.init.normal_(self.time_mask, mean=0.0, std=0.02)
         if hasattr(self.pe_encoder, 'reset_parameters'):
             self.pe_encoder.reset_parameters()
-        self.lin.reset_parameters()
+        for norm in self.norms:
+            norm.reset_parameters()
+        self.mlp.reset_parameters()
 
     def forward(
         self,
@@ -131,25 +163,25 @@ class RelGTTokenizer(torch.nn.Module):
         rel_time: Tensor,
         edge_index: Tensor,
     ) -> Tensor:
-        """Forward pass.
+        r"""Forward pass.
 
         Args:
             feat_dict (Dict[str, Any]): The per-node-type inputs to
-                feature_encoder, e.g., a dictionary holding a
-                torch_frame.TensorFrame for each node type.
+                :obj:`feature_encoder`, *e.g.*, a dictionary holding a
+                :class:`torch_frame.TensorFrame` for each node type.
             node_idx (torch.Tensor): The index of each token within its node
-                type, i.e., the row in the corresponding output of
-                feature_encoder, of shape [B, K].
+                type, *i.e.*, the row in the corresponding output of
+                :obj:`feature_encoder`, of shape :obj:`[B, K]`.
             node_type (torch.Tensor): The node type ID of each token, of shape
-                [B, K].
+                :obj:`[B, K]`.
             hop (torch.Tensor): The hop distance of each token from its seed
-                node, of shape [B, K].
-                Filler nodes are denoted by max_hops + 1.
+                node, of shape :obj:`[B, K]`.
+                Filler nodes are denoted by :obj:`max_hops + 1`.
             rel_time (torch.Tensor): The time of each seed node minus the time
-                of each of its tokens in seconds, of shape [B, K].
+                of each of its tokens in seconds, of shape :obj:`[B, K]`.
             edge_index (torch.Tensor): The edge indices of the sampled
-                subgraphs, where token k of seed node b is denoted by node
-                index b * K + k.
+                subgraphs, where token :obj:`k` of seed node :obj:`b` is
+                denoted by node index :obj:`b * K + k`.
         """
         if node_idx.dim() != 2:
             raise ValueError(f"Expected 'node_idx' to be two-dimensional "
@@ -163,29 +195,25 @@ class RelGTTokenizer(torch.nn.Module):
 
         B, K = node_idx.size()
 
-        # Encode each table, then look up each node's row via (table, row)
         x_feat = self._gather_features(feat_dict, node_type, node_idx)
 
         x_type = self.type_emb(node_type)
         x_hop = self.hop_emb(hop)
 
-        # Convert seconds to days
         days = rel_time.to(self.time_lin.weight.dtype) / SECONDS_PER_DAY
-        # PositionalEncoding needs flat vector, so flatten to [B * K], 
-        # encode, and reshape after
-        x_time = self.time_lin(self.time_enc(days.view(-1))).view(B, K, -1)
+        x_time = self.time_lin(self.time_enc(days.reshape(-1)))
+        x_time = x_time.view(B, K, -1)
+        x_time = torch.where((rel_time < 0).unsqueeze(-1), self.time_mask,
+                             x_time)
 
-        # One ID per-seed node, repeated K times 
+        # Token `k` of seed node `b` is node `b * K + k` in `edge_index`:
         batch = torch.arange(B, device=node_idx.device).repeat_interleave(K)
-        # Run positional encoder on all sampled subgraphs
         x_pe = self.pe_encoder(edge_index, B * K, batch=batch, batch_size=B)
-        # All components need same shape
         x_pe = x_pe.view(B, K, -1)
 
-        # Concatenate along the last dim to get one 5d-vector per token
-        out = torch.cat([x_feat, x_type, x_hop, x_time, x_pe], dim=-1)
-        # self.lin is the matrix O, mapping 5d back to d
-        return self.lin(out)
+        xs = [x_feat, x_type, x_hop, x_time, x_pe]
+        out = torch.cat([norm(x) for norm, x in zip(self.norms, xs)], dim=-1)
+        return self.mlp(out)
 
     def _gather_features(
         self,
@@ -193,20 +221,16 @@ class RelGTTokenizer(torch.nn.Module):
         node_type: Tensor,
         node_idx: Tensor,
     ) -> Tensor:
-        # Run feature encoder, returns dict of table name -> encoded rows
         x_dict = self.feature_encoder(feat_dict)
 
         out: Optional[Tensor] = None
-        # i is the table ID, key is table name for x_dict
         for i, key in enumerate(self.node_types):
-            # If we do not have a table, we should not have any nodes from
-            # that table
+            # Node types without tokens may be missing from `x_dict`:
             if key not in x_dict:
                 if bool((node_type == i).any()):
                     raise ValueError(f"'feature_encoder' did not return "
                                      f"features for node type '{key}'")
                 continue
-            # Otherwise, feature encoder gives encoded table i
             x = x_dict[key]
             if x.dim() != 2 or x.size(-1) != self.channels:
                 raise ValueError(f"Expected 'feature_encoder' to return "
@@ -216,13 +240,8 @@ class RelGTTokenizer(torch.nn.Module):
             if out is None:
                 out = x.new_zeros(*node_idx.size(), self.channels)
 
-            # True for nodes from table i
             mask = node_type == i
-            # Get row numbers (in table i) for nodes of this node_type
-            row_nums =  node_idx[mask]
-            # Get rows from table i and copy them to the correct slots of 
-            # output
-            out[mask] = x[row_nums]
+            out[mask] = x[node_idx[mask]]
 
         if out is None:
             raise ValueError(f"'feature_encoder' did not return features for "

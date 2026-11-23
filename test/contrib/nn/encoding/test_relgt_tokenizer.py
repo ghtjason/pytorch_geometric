@@ -57,14 +57,20 @@ def get_inputs(device=None):
     return feat_dict, node_idx, node_type, hop, rel_time, edge_index
 
 
+class Slice(torch.nn.Module):
+    def __init__(self, start, end):
+        super().__init__()
+        self.start, self.end = start, end
+
+    def forward(self, x):
+        return x[..., self.start:self.end]
+
+
 def select(model, slot):
-    # Let the final projection output only the `slot`-th of the five
+    # Let the final MLP output only the `slot`-th of the five (normalized)
     # concatenated token elements:
     C = model.channels
-    with torch.no_grad():
-        model.lin.weight.zero_()
-        model.lin.weight[:, slot * C:(slot + 1) * C] = torch.eye(C)
-        model.lin.bias.zero_()
+    model.mlp = Slice(slot * C, (slot + 1) * C)
 
 
 @withDevice
@@ -80,8 +86,12 @@ def test_relgt_tokenizer(device):
 
 
 def test_relgt_tokenizer_backward():
+    feat_dict, node_idx, node_type, hop, rel_time, edge_index = get_inputs()
+    rel_time[1, 3] = -1.0  # Ensure that `time_mask` receives gradients.
+
     model = RelGTTokenizer(16, NODE_TYPES, DictEncoder(4, 16))
-    model(*get_inputs()).sum().backward()
+    out = model(feat_dict, node_idx, node_type, hop, rel_time, edge_index)
+    out.sum().backward()
 
     for name, param in model.named_parameters():
         assert param.grad is not None, name
@@ -101,8 +111,8 @@ def test_relgt_tokenizer_feature_gathering():
     for b in range(node_idx.size(0)):
         for k in range(node_idx.size(1)):
             key = NODE_TYPES[int(node_type[b, k])]
-            expected = feat_dict[key][node_idx[b, k]]
-            assert torch.allclose(out[b, k], expected)
+            expected = model.norms[0](feat_dict[key][node_idx[b, k]])
+            assert torch.allclose(out[b, k], expected, atol=1e-6)
 
 
 def test_relgt_tokenizer_hop_embedding():
@@ -116,7 +126,7 @@ def test_relgt_tokenizer_hop_embedding():
     assert torch.allclose(out[0, 1], out[1, 1])  # Hop 1.
     assert torch.allclose(out[0, 2], out[1, 3])  # Hop 2.
     # Filler nodes get their own embedding, distinct from 2-hop neighbors:
-    assert torch.allclose(out[0, 3], model.hop_emb.weight[3])
+    assert torch.allclose(out[0, 3], model.norms[2](model.hop_emb.weight[3]))
     assert not torch.allclose(out[0, 3], out[0, 2])
 
 
@@ -132,8 +142,24 @@ def test_relgt_tokenizer_time_encoding():
     assert torch.allclose(out[0, 0], out[1, 1])
     # Relative time is measured in days:
     days = torch.tensor([1.0])
-    expected = model.time_lin(model.time_enc(days))[0]
+    expected = model.norms[3](model.time_lin(model.time_enc(days)))[0]
     assert torch.allclose(out[0, 2], expected, atol=1e-6)
+
+
+def test_relgt_tokenizer_negative_time_mask():
+    feat_dict, node_idx, node_type, hop, rel_time, edge_index = get_inputs()
+    rel_time[0, 3] = -1.0
+    rel_time[1, 3] = -1e6
+
+    model = RelGTTokenizer(8, NODE_TYPES, DictEncoder(4, 8))
+    select(model, slot=3)
+    out = model(feat_dict, node_idx, node_type, hop, rel_time, edge_index)
+
+    # Tokens from the future get the learnable `time_mask` embedding:
+    expected = model.norms[3](model.time_mask)
+    assert torch.allclose(out[0, 3], expected, atol=1e-6)
+    assert torch.allclose(out[1, 3], expected, atol=1e-6)
+    assert not torch.allclose(out[0, 2], expected, atol=1e-6)
 
 
 def test_relgt_tokenizer_elements_affect_output():

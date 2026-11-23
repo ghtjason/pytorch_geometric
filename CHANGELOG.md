@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added `torch_geometric.contrib.nn.models.RelGT` (Relational Graph Transformer) model ([#XXXXX](https://github.com/pyg-team/pytorch_geometric/pull/XXXXX))
 - Added `torch_geometric.contrib.nn.attention.RelGTLayer` (local all-pair transformer layer from RelGT) ([#XXXXX](https://github.com/pyg-team/pytorch_geometric/pull/XXXXX))
 - Added `torch_geometric.contrib.nn.attention.GlobalCentroidAttention` (global attention to EMA k-means centroids from RelGT) ([#XXXXX](https://github.com/pyg-team/pytorch_geometric/pull/XXXXX))
 - Added `torch_geometric.contrib.transforms.RelGTTokenSampler` (fixed-size temporal token sampler from RelGT) ([#XXXXX](https://github.com/pyg-team/pytorch_geometric/pull/XXXXX))

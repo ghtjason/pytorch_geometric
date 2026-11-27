@@ -45,6 +45,21 @@ Models
    :undoc-members:
    :exclude-members: message, aggregate, message_and_aggregate, update, MessagePassing, training, init_conv
 
+Attention
+---------
+
+.. currentmodule:: torch_geometric.contrib.nn.attention
+
+.. autosummary::
+   :nosignatures:
+   {% for cls in torch_geometric.contrib.nn.attention.classes %}
+     {{ cls }}
+   {% endfor %}
+
+.. automodule:: torch_geometric.contrib.nn.attention
+   :members:
+   :undoc-members:
+
 Datasets
 --------
 
